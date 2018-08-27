@@ -36,10 +36,8 @@
     // Exclude items from being draggable, if the
     // selector matches the item
     exclude: "",
-    // If true, search for nested containers within an item.If you nest containers,
-    // either the original selector with which you call the plugin must only match the top containers,
-    // or you need to specify a group (see the bootstrap nav example)
-    nested: true,
+    // The maximum nesting depth. Set to 1 or below for no nesting.
+    maxDepth: Infinity,
     // If true, the items are assumed to be arranged vertically
     vertical: true
   }, // end container defaults
@@ -158,9 +156,9 @@
   subContainerKey = "subContainers"
 
   /*
-   * a is Array [left, right, top, bottom]
-   * b is array [left, top]
-   */
+  * a is Array [left, right, top, bottom]
+  * b is array [left, top]
+  */
   function d(a,b) {
     var x = Math.max(0, a[0] - b[0], b[0] - a[1]),
     y = Math.max(0, a[2] - b[1], b[1] - a[3])
@@ -262,13 +260,13 @@
       }
     },
     drag: function  (e) {
-      if(!this.dragging){
+      if(!this.draggingDepth){
         if(!this.distanceMet(e) || !this.delayMet)
           return
 
         this.options.onDragStart(this.item, this.itemContainer, groupDefaults.onDragStart, e)
         this.item.before(this.placeholder)
-        this.dragging = true
+        this.draggingDepth = this.itemContainer.itemDepth(this.item)
       }
 
       this.setPointer(e)
@@ -293,7 +291,7 @@
 
       this.dragInitDone = false
 
-      if(this.dragging){
+      if(this.draggingDepth){
         // processing Drop, check if placeholder is detached
         if(this.placeholder.closest("html")[0]){
           this.placeholder.before(this.item).detach()
@@ -306,7 +304,7 @@
         this.clearDimensions()
         this.clearOffsetParent()
         this.lastAppendedItem = this.sameResultBox = undefined
-        this.dragging = false
+        this.draggingDepth = false
       }
     },
     searchValidTarget: function  (pointer, lastPointer) {
@@ -316,8 +314,8 @@
       }
 
       var distances = sortByDistanceDesc(this.getContainerDimensions(),
-                                         pointer,
-                                         lastPointer),
+                                        pointer,
+                                        lastPointer),
       i = distances.length
 
       while(i--){
@@ -406,6 +404,17 @@
         top: e.pageY || o.pageY
       }
     },
+    maxDepth: function () {
+      var maxDepth = 0,
+      depth,
+      i = this.containers.length
+      while(i--){
+        depth = this.containers[i].maxDepth()
+        if(depth > maxDepth)
+          maxDepth = depth
+      }
+      return maxDepth
+    },
     setupDelayTimer: function () {
       var that = this
       this.delayMet = !this.options.delay
@@ -462,6 +471,8 @@
     this.rootGroup = this.options.rootGroup || this.group
     this.handle = this.rootGroup.options.handle || this.rootGroup.options.itemSelector
 
+    this.parentDepth = this.options.parentDepth || 0
+
     var itemPath = this.rootGroup.options.itemPath
     this.target = itemPath ? this.el.find(itemPath) : this.el
 
@@ -488,8 +499,8 @@
     },
     searchValidTarget: function  (pointer, lastPointer) {
       var distances = sortByDistanceDesc(this.getItemDimensions(),
-                                         pointer,
-                                         lastPointer),
+                                        pointer,
+                                        lastPointer),
       i = distances.length,
       rootGroup = this.rootGroup,
       validTarget = !rootGroup.options.isValidTarget ||
@@ -501,9 +512,10 @@
       } else
         while(i--){
           var index = distances[i][0],
-          distance = distances[i][1]
-          if(!distance && this.hasChildGroup(index)){
-            var found = this.getContainerGroup(index).searchValidTarget(pointer, lastPointer)
+          distance = distances[i][1],
+          childGroup = !distance && this.getChildGroup(index)
+          if(childGroup){
+            var found = childGroup.searchValidTarget(pointer, lastPointer)
             if(found)
               return true
           }
@@ -543,16 +555,19 @@
         } else
           sameResultBox.left += width / 2
       }
-      if(this.hasChildGroup(index))
+      if(this.getChildGroup(index))
         sameResultBox = emptyBox
       this.rootGroup.movePlaceholder(this, item, method, sameResultBox)
     },
+    getItems: function() {
+      this.items = this.$getChildren(this.el, "item").filter(
+        ":not(." + this.group.options.placeholderClass + ", ." + this.group.options.draggedClass + ")"
+      ).get()
+      return this.items
+    },
     getItemDimensions: function  () {
       if(!this.itemDimensions){
-        this.items = this.$getChildren(this.el, "item").filter(
-          ":not(." + this.group.options.placeholderClass + ", ." + this.group.options.draggedClass + ")"
-        ).get()
-        setDimensions(this.items, this.itemDimensions = [], this.options.tolerance)
+        setDimensions(this.getItems(), this.itemDimensions = [], this.options.tolerance)
       }
       return this.itemDimensions
     },
@@ -567,23 +582,42 @@
         offsetParent = el.offsetParent()
       return offsetParent
     },
-    hasChildGroup: function (index) {
-      return this.options.nested && this.getContainerGroup(index)
+    maxDepth: function () {
+      var that = this,
+      maxDepth = 0
+      $.each(this.getItems(), function(){
+        var itemDepth = that.itemDepth(this);
+        if (itemDepth > maxDepth)
+          maxDepth = itemDepth
+      })
+      return maxDepth
     },
-    getContainerGroup: function  (index) {
-      var childGroup = $.data(this.items[index], subContainerKey)
+    itemDepth: function (item) {
+      var depth = 1,
+      group = this.getContainerGroup(item)
+      if(group)
+        depth += group.maxDepth()
+      return depth
+    },
+    getChildGroup: function (index) {
+      return this.rootGroup.draggingDepth + this.parentDepth < this.options.maxDepth &&
+        this.getContainerGroup(this.items[index])
+    },
+    getContainerGroup: function  (item) {
+      var childGroup = $.data(item, subContainerKey)
       if( childGroup === undefined){
-        var childContainers = this.$getChildren(this.items[index], "container")
+        var childContainers = this.$getChildren(item, "container")
         childGroup = false
 
         if(childContainers[0]){
           var options = $.extend({}, this.options, {
             rootGroup: this.rootGroup,
+            parentDepth: this.parentDepth + 1,
             group: groupCounter ++
           })
           childGroup = childContainers[pluginName](options).data(pluginName).group
         }
-        $.data(this.items[index], subContainerKey, childGroup)
+        $.data(item, subContainerKey, childGroup)
       }
       return childGroup
     },
@@ -666,12 +700,12 @@
   $.extend(Container.prototype, API)
 
   /**
-   * jQuery API
-   *
-   * Parameters are
-   *   either options on init
-   *   or a method name followed by arguments to pass to the method
-   */
+  * jQuery API
+  *
+  * Parameters are
+  *   either options on init
+  *   or a method name followed by arguments to pass to the method
+  */
   $.fn[pluginName] = function(methodOrOptions) {
     var args = Array.prototype.slice.call(arguments, 1)
 
@@ -684,7 +718,6 @@
       else if(!object && (methodOrOptions === undefined ||
                           typeof methodOrOptions === "object"))
         $t.data(pluginName, new Container($t, methodOrOptions))
-
       return this
     });
   };
